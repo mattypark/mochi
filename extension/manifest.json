@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "mochi — Substack draft reader",
+  "version": "0.1.0",
+  "description": "Reads the Substack editor and streams the draft to the mochi desktop pet on this machine. Sends nothing anywhere else.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://substack.com/*",
+        "https://*.substack.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
