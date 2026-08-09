@@ -66,6 +66,32 @@ local function trim(text, limit)
   return text
 end
 
+--- Blocks whose prose is his. A quotation is someone else's sentence: flagging
+--- its adverbs is a false positive, and false positives are how a checker earns
+--- being switched off. Headings are his, but they are titles rather than prose,
+--- so the sentence-level rules leave them alone too.
+local SKIP = { blockquote = true, pre = true, figcaption = true }
+
+local function ownProse(block)
+  return block and block.text and block.text ~= "" and not SKIP[block.tag]
+end
+
+--- Iterate only the blocks a sentence-level rule should judge, keeping the
+--- original index so a finding still points at the right paragraph.
+local function proseBlocks(draft)
+  local blocks = draft.blocks or {}
+  local index = 0
+
+  return function()
+    while true do
+      index = index + 1
+      local block = blocks[index]
+      if block == nil then return nil end
+      if ownProse(block) then return index, block end
+    end
+  end
+end
+
 -- ------------------------------------------------------------------ findings
 
 local function finding(list, item)
@@ -84,7 +110,7 @@ end
 --- "-ly" words, minus the ones that only look like adverbs. Where a heavier verb
 --- is known for the exact pair, it is offered — that is the actual advice.
 function Rules.adverbs(draft, out)
-  for index, block in ipairs(draft.blocks or {}) do
+  for index, block in proseBlocks(draft) do
     local text = lower(block.text)
 
     for pair, heavier in pairs(Lexicon.heavierVerbs) do
@@ -118,7 +144,7 @@ end
 --- agentless passive ("mistakes were made") is the one worth catching, and
 --- requiring "by" would miss exactly those.
 function Rules.passive(draft, out)
-  for index, block in ipairs(draft.blocks or {}) do
+  for index, block in proseBlocks(draft) do
     local list = words(block.text)
 
     for i = 1, #list - 1 do
@@ -147,7 +173,7 @@ end
 -- -------------------------------------------------------------------- stadium
 
 function Rules.stadium(draft, out)
-  for index, block in ipairs(draft.blocks or {}) do
+  for index, block in proseBlocks(draft) do
     local text = lower(block.text)
     for _, entry in ipairs(Lexicon.stadium) do
       if text:find(entry.pattern, 1, true) then
@@ -168,7 +194,7 @@ end
 -- ------------------------------------------------------------------- inflated
 
 function Rules.inflated(draft, out)
-  for index, block in ipairs(draft.blocks or {}) do
+  for index, block in proseBlocks(draft) do
     local text = " " .. lower(block.text) .. " "
 
     for bloated, plain in pairs(Lexicon.inflated) do

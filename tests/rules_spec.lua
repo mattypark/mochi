@@ -18,13 +18,21 @@ local Rules = require("mochi.rules")
 
 local passed, failed = 0, 0
 
+--- `paragraphs` is the shorthand for a body of plain <p>; `blocks` is the long
+--- form, for the cases where the tag itself is what's under test.
 local function draft(spec)
-  local blocks = {}
-  for _, text in ipairs(spec.paragraphs or {}) do
-    blocks[#blocks + 1] = { tag = "p", text = text }
+  local blocks = spec.blocks or {}
+  local texts = {}
+
+  if not spec.blocks then
+    for _, text in ipairs(spec.paragraphs or {}) do
+      blocks[#blocks + 1] = { tag = "p", text = text }
+    end
   end
 
-  local body = table.concat(spec.paragraphs or {}, "\n\n")
+  for _, block in ipairs(blocks) do texts[#texts + 1] = block.text end
+
+  local body = table.concat(texts, "\n\n")
   local count = 0
   for _ in body:gmatch("[%a'][%a'-]*") do count = count + 1 end
 
@@ -82,6 +90,13 @@ test("offers the heavier verb for a known pair",
 
 test("does not flag -ly words that are not adverbs",
   { paragraphs = { "The family sent a reply about the supply." } },
+  "adverb", false)
+
+test("does not critique text inside a blockquote",
+  { blocks = {
+      { tag = "blockquote", text = "If you've got an idea, start today. There's honestly no better time than now." },
+      { tag = "p", text = "I never knew what I wanted to do in life." },
+    } },
   "adverb", false)
 
 -- passive ---------------------------------------------------------------------
