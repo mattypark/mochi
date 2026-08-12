@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "mochi",
+  "label": "mochi",
+  "module": "mochi",
+  "version": "0.2.0",
+  "icon": "assets/pet.png",
+  "blurb": "Substack writing coach. Enforces one playbook, live."
+}
