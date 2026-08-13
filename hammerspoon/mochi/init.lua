@@ -2,13 +2,23 @@
 ---
 ---   require("mochi")
 ---
---- What exists at this stage: the pet, its menu, and writing mode. The pet is on
---- screen whenever Hammerspoon is running; writing mode gates only whether the
---- draft is read. Turning mode on with no browser extension connected is not an
---- error — it means nothing is arriving yet, and the menu says so rather than
---- pretending to work.
+--- The pet is on screen whenever Hammerspoon is running. Writing mode gates only
+--- whether the draft is read — and it gates it by opening and closing the bridge
+--- socket, not by checking a flag, so "not reading" is verifiable from outside.
+---
+--- The flow, end to end:
+---
+---   browser extension → bridge.lua → rules.lua → nag.lua → bubble.lua
+---   (reads the DOM)     (websocket)  (findings)  (timing)  (says it)
+---
+--- Nothing in that chain asks a model anything. The judgement tier is Stage 6
+--- and sits alongside, never in front.
 
 local Pet = require("mochi.pet")
+local Bubble = require("mochi.bubble")
+local Bridge = require("mochi.bridge")
+local Rules = require("mochi.rules")
+local Nag = require("mochi.nag")
 local State = require("mochi.state")
 
 local Mochi = {}
@@ -20,37 +30,120 @@ local NAG_MODES = {
 }
 
 local state = State.load()
-local pet, menu
+local pet, bubble, menu
 local writing = false
+local connected = false
+local latest = nil          -- the last draft that arrived
+local previousWords = nil   -- for the 10% rule; Stage 4 makes this durable
 
--- ------------------------------------------------------------------ writing
+-- -------------------------------------------------------------------- speaking
 
---- Writing mode. Off is a real off: Stage 2 closes the bridge socket rather than
---- ignoring what arrives on it, so "not reading" is verifiable from outside
---- rather than a promise made in a callback.
+local function say(headline, detail, footer)
+  if not bubble then return end
+  bubble:setAnchor(pet and pet:frame() or nil)
+  bubble:show(headline, detail, footer)
+end
+
+--- Turn a Nag summary into a bubble. The footer always names the engine.
+local function speak(summary)
+  if not summary then
+    say("Nothing to flag.", nil, "rules · deterministic")
+    return
+  end
+
+  local headline
+  if summary.total == 1 then
+    headline = "One thing:"
+  else
+    headline = string.format("%d things:", summary.total)
+  end
+
+  local detail = "· " .. table.concat(summary.lines, "\n· ")
+  if summary.hidden > 0 then
+    detail = detail .. string.format("\n  (+%d more)", summary.hidden)
+  end
+
+  say(headline, detail, "rules · deterministic")
+  if pet then pet:nudge() end
+end
+
+-- ---------------------------------------------------------------------- drafts
+
+local function onDraft(draft)
+  latest = draft
+
+  local findings = Rules.check(draft, { previousWords = previousWords })
+  Nag.consider(findings, state.nagMode, speak)
+end
+
+local function onStatus(isConnected)
+  local was = connected
+  connected = isConnected and true or false
+
+  -- Only announced on the transition, and only when he switched writing on —
+  -- otherwise this fires on every message.
+  if connected and not was and writing then
+    say("Reading your draft.", nil, "bridge · connected")
+  end
+end
+
+-- -------------------------------------------------------------------- writing
+
+--- Writing mode. On starts the bridge; off stops it, which drops the extension's
+--- connection rather than leaving a socket open that we promise not to read.
 local function setWriting(on)
   writing = on and true or false
+
+  if writing then
+    local ok, err = Bridge.start()
+    if not ok then
+      writing = false
+      say("Couldn't open the bridge.", tostring(err), "bridge · failed")
+    else
+      say("Writing mode on.", "Open a Substack draft and start typing.", "bridge · listening")
+    end
+  else
+    Bridge.stop()
+    Nag.reset()
+    connected = false
+    if bubble then bubble:hide() end
+  end
+
   if pet then pet:setAwake(writing) end
-  if Mochi.onWritingChanged then Mochi.onWritingChanged(writing) end
-  if menu then Mochi.refreshMenu() end
+  Mochi.refreshMenu()
 end
 
 function Mochi.toggleWriting()
   setWriting(not writing)
 end
 
--- --------------------------------------------------------------------- menu
-
-local function nagLabel()
-  for _, mode in ipairs(NAG_MODES) do
-    if mode.id == state.nagMode then return mode.label end
+--- Clicking the pet asks it a direct question, and a direct question always gets
+--- an answer — including "I'm not reading anything", which is the answer that
+--- was missing when the fade was the only signal.
+local function onPetClick()
+  if not writing then
+    say("I'm asleep.", "Click the menu bar → Writing mode: on, and I'll start reading your draft.",
+        "mochi · off")
+    return
   end
-  return state.nagMode
+
+  if not connected then
+    say("Nothing's reaching me yet.",
+        "Writing mode is on, but no Substack tab has connected. Reload the draft tab.",
+        "bridge · waiting")
+    return
+  end
+
+  if not latest then
+    say("Connected, but the draft is empty.", nil, "bridge · connected")
+    return
+  end
+
+  Nag.onDemand(speak)
 end
 
---- The menu bar title carries the mode, so writing mode is legible without
---- opening anything. The menu items themselves are built on demand by
---- `setMenu(fn)` and need no refreshing.
+-- --------------------------------------------------------------------- menu
+
 function Mochi.refreshMenu()
   if not menu then return end
   menu:setTitle(writing and "mochi ●" or "mochi")
@@ -63,6 +156,12 @@ local function buildMenu()
       fn = Mochi.toggleWriting,
       checked = writing,
     },
+    {
+      title = writing
+        and (connected and "  a draft is connected" or "  waiting for a draft tab")
+        or "  not reading anything",
+      disabled = true,
+    },
     { title = "-" },
   }
 
@@ -70,8 +169,6 @@ local function buildMenu()
     items[#items + 1] = {
       title = mode.label,
       checked = state.nagMode == mode.id,
-      -- Greyed out until mode is on, because choosing how mochi interrupts is
-      -- meaningless while it isn't reading anything.
       disabled = not writing,
       fn = function()
         state.nagMode = mode.id
@@ -97,10 +194,26 @@ end
 -- --------------------------------------------------------------------- life
 
 function Mochi.start()
+  bubble = Bubble.new()
+
   pet = Pet.new({
     state = state,
-    onClick = function() Mochi.toggleWriting() end,
-    onDragEnd = function() State.save(state) end,
+    onClick = onPetClick,
+    onDragEnd = function()
+      State.save(state)
+      if bubble then bubble:setAnchor(pet:frame()) end
+    end,
+  })
+
+  Bridge.configure({
+    onDraft = onDraft,
+    onStatus = onStatus,
+    onLost = function()
+      latest = nil
+      say("I can't find the editor on that page.",
+          "Substack may have changed its markup — the selector needs updating.",
+          "bridge · selector failed")
+    end,
   })
 
   menu = hs.menubar.new()
@@ -109,7 +222,6 @@ function Mochi.start()
     menu:setMenu(buildMenu)
   end
 
-  -- The bus contract: write our own handle, never read another pet's.
   _G.PETS = _G.PETS or {}
   _G.PETS.mochi = {
     name = "mochi",
@@ -126,13 +238,14 @@ end
 
 function Mochi.quit()
   setWriting(false)
+  if bubble then bubble:delete(); bubble = nil end
   if pet then pet:delete(); pet = nil end
   if menu then menu:delete(); menu = nil end
   if _G.PETS then _G.PETS.mochi = nil end
 end
 
 function Mochi.isWriting() return writing end
-function Mochi.nagMode() return state.nagMode end
-function Mochi.nagLabel() return nagLabel() end
+function Mochi.isConnected() return connected end
+function Mochi.bridgeUrl() return Bridge.url() end
 
 return Mochi.start()

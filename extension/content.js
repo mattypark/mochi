@@ -20,6 +20,8 @@
   "use strict";
 
   const DEBOUNCE_MS = 400;   // long enough to not fire mid-word, short enough to feel live
+  const RECONNECT_MS = 4000; // floor between connection attempts while mochi is asleep
+  const BRIDGE_URL = "ws://127.0.0.1:27852/mochi";
   const LOG_PREFIX = "[mochi]";
 
   // ------------------------------------------------------------------ finding
@@ -183,49 +185,55 @@
 
   // ------------------------------------------------------------------ emitting
 
-  let hud = null;
+  // The pet is the status display. There is deliberately nothing drawn on the
+  // page: an editor is for writing in, and a chip in the corner of it is one
+  // more thing to look at while trying not to look at things.
 
-  function ensureHud() {
-    if (hud && hud.isConnected) return hud;
+  let socket = null;
+  let reconnectAt = 0;
 
-    hud = document.createElement("div");
-    hud.className = "mochi-hud";
-    hud.innerHTML =
-      '<span class="mochi-hud__dot"></span>' +
-      '<span class="mochi-hud__label"></span>' +
-      '<span class="mochi-hud__detail"></span>';
+  /// Connect only when there is something to send. The bridge is closed
+  /// whenever writing mode is off, so a failed connection is the normal resting
+  /// state and must stay silent — retrying loudly would fill the console with
+  /// noise every few seconds all day.
+  function ensureSocket() {
+    if (socket && socket.readyState <= WebSocket.OPEN) return socket;
 
-    document.body.appendChild(hud);
-    return hud;
-  }
+    const now = Date.now();
+    if (now < reconnectAt) return null;
+    reconnectAt = now + RECONNECT_MS;
 
-  function paint(label, detail, lost) {
-    const node = ensureHud();
-    node.classList.toggle("mochi-hud--lost", Boolean(lost));
-    node.querySelector(".mochi-hud__label").textContent = label;
-    node.querySelector(".mochi-hud__detail").textContent = detail || "";
+    try {
+      socket = new WebSocket(BRIDGE_URL);
+      socket.addEventListener("close", () => { socket = null; });
+      socket.addEventListener("error", () => { socket = null; });
+    } catch (_) {
+      socket = null;
+    }
+
+    return socket;
   }
 
   let lastBody = null;
 
-  /// Stage 1 sink. Stage 2 swaps this for the WebSocket without touching
-  /// anything above it.
   function emit(draft) {
-    paint(
-      `mochi · ${draft.words} words`,
-      `${draft.blocks.length} blocks · ${draft.via.editor}`
-    );
-    console.log(LOG_PREFIX, `${draft.words} words`, draft);
+    const live = ensureSocket();
+    if (live && live.readyState === WebSocket.OPEN) {
+      live.send(JSON.stringify(draft));
+    }
   }
 
   function tick() {
     const draft = snapshot();
 
-    // Being unable to find the editor is the one failure that must never look
-    // like an empty draft — that is how a broken selector survives a redesign
-    // unnoticed for weeks.
+    // Being unable to find the editor must never look like an empty draft —
+    // that is how a broken selector survives a redesign unnoticed for weeks. It
+    // is reported as a distinct message so the pet can say which one it is.
     if (!draft) {
-      paint("mochi · no editor found", "open a draft", true);
+      const live = ensureSocket();
+      if (live && live.readyState === WebSocket.OPEN) {
+        live.send(JSON.stringify({ kind: "lost", url: location.href }));
+      }
       return;
     }
 
