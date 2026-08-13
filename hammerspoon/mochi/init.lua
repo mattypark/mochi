@@ -20,6 +20,7 @@ local Bridge = require("mochi.bridge")
 local Rules = require("mochi.rules")
 local Nag = require("mochi.nag")
 local State = require("mochi.state")
+local Log = require("mochi.log")
 
 local Mochi = {}
 
@@ -33,12 +34,14 @@ local state = State.load()
 local pet, bubble, menu
 local writing = false
 local connected = false
+local askedTwice = false    -- second click on a stuck mode turns it off
 local latest = nil          -- the last draft that arrived
 local previousWords = nil   -- for the 10% rule; Stage 4 makes this durable
 
 -- -------------------------------------------------------------------- speaking
 
 local function say(headline, detail, footer)
+  Log.write("say: %s", headline)
   if not bubble then return end
   bubble:setAnchor(pet and pet:frame() or nil)
   bubble:show(headline, detail, footer)
@@ -71,8 +74,10 @@ end
 
 local function onDraft(draft)
   latest = draft
+  Log.write("draft received: %d words, %d blocks", draft.words, #draft.blocks)
 
   local findings = Rules.check(draft, { previousWords = previousWords })
+  Log.write("%d findings, nag mode %s", #findings, state.nagMode)
   Nag.consider(findings, state.nagMode, speak)
 end
 
@@ -93,6 +98,7 @@ end
 --- connection rather than leaving a socket open that we promise not to read.
 local function setWriting(on)
   writing = on and true or false
+  Log.write("writing mode %s", writing and "ON" or "off")
 
   if writing then
     local ok, err = Bridge.start()
@@ -117,22 +123,32 @@ function Mochi.toggleWriting()
   setWriting(not writing)
 end
 
---- Clicking the pet asks it a direct question, and a direct question always gets
---- an answer — including "I'm not reading anything", which is the answer that
---- was missing when the fade was the only signal.
+--- Clicking the pet is the primary control, not a shortcut for one.
+---
+--- The menu bar cannot be relied on: menu-bar space is finite, macOS drops items
+--- silently when it runs out, and menu-bar managers hide them on purpose. A pet
+--- whose only switch lives up there is a pet that appears broken through no
+--- fault of its own. The sprite is always on screen, so the sprite is the switch.
 local function onPetClick()
   if not writing then
-    say("I'm asleep.", "Click the menu bar → Writing mode: on, and I'll start reading your draft.",
-        "mochi · off")
+    setWriting(true)
     return
   end
 
+  -- Already awake and being clicked: that's a question, not a request to stop.
+  -- Turning off is the menu, or a second click when there is nothing to say.
   if not connected then
     say("Nothing's reaching me yet.",
-        "Writing mode is on, but no Substack tab has connected. Reload the draft tab.",
+        "Writing mode is on, but no Substack tab has connected.\nReload the draft tab (⌘R).\nClick me again to go back to sleep.",
         "bridge · waiting")
+    -- A second click on a mode that isn't working turns it off, so the pet is
+    -- never a state you can't get out of without the menu bar.
+    if askedTwice then setWriting(false) end
+    askedTwice = not askedTwice
     return
   end
+
+  askedTwice = false
 
   if not latest then
     say("Connected, but the draft is empty.", nil, "bridge · connected")
@@ -194,6 +210,7 @@ end
 -- --------------------------------------------------------------------- life
 
 function Mochi.start()
+  Log.write("starting")
   bubble = Bubble.new()
 
   pet = Pet.new({
@@ -220,6 +237,11 @@ function Mochi.start()
   if menu then
     menu:setTitle("mochi")
     menu:setMenu(buildMenu)
+    Log.write("menu bar item created")
+  else
+    -- Not fatal, and not silent. macOS refuses new menu-bar items when the bar
+    -- is full, which looks identical to the pet being broken.
+    Log.write("MENU BAR ITEM FAILED — the bar is probably full. Click the pet instead.")
   end
 
   _G.PETS = _G.PETS or {}
@@ -231,6 +253,12 @@ function Mochi.start()
     hide = function() if pet then pet:hide() end end,
     isHidden = function() return pet and pet:isHidden() or false end,
     quit = function() Mochi.quit() end,
+
+    -- Capabilities beyond the base contract, so a hotkey in petcommands.lua has
+    -- something to dispatch to. `toggle` is writing mode, not visibility: the
+    -- sprite staying put is the whole point of it.
+    toggle = function() Mochi.toggleWriting() end,
+    speak = function() onPetClick() end,
   }
 
   return Mochi
