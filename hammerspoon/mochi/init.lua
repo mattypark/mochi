@@ -72,6 +72,7 @@ end
 
 -- ---------------------------------------------------------------------- drafts
 
+--- @return table marks  where the page should draw, sent back in the reply
 local function onDraft(draft)
   latest = draft
   Log.write("draft received: %d words, %d blocks", draft.words, #draft.blocks)
@@ -79,6 +80,23 @@ local function onDraft(draft)
   local findings = Rules.check(draft, { previousWords = previousWords })
   Log.write("%d findings, nag mode %s", #findings, state.nagMode)
   Nag.consider(findings, state.nagMode, speak)
+
+  -- Only findings that belong to a paragraph can be pointed at. Word count and
+  -- title findings have no block, and marking the whole document for them would
+  -- be worse than not marking at all.
+  local marks = {}
+  for _, item in ipairs(findings) do
+    if item.block then
+      marks[#marks + 1] = {
+        block = item.block,
+        rule = item.rule,
+        text = item.sample,
+        severity = item.severity,
+      }
+    end
+  end
+
+  return marks
 end
 
 local function onStatus(isConnected)
@@ -130,25 +148,33 @@ end
 --- whose only switch lives up there is a pet that appears broken through no
 --- fault of its own. The sprite is always on screen, so the sprite is the switch.
 local function onPetClick()
-  if not writing then
-    setWriting(true)
+  -- The menu opens at the pointer rather than in the menu bar, because the menu
+  -- bar item is routinely evicted by macOS when the app menus are wide — which
+  -- is what made mochi look broken in the first place. The same menu is served
+  -- from both places; only the anchor differs.
+  if menu then
+    menu:popupMenu(hs.mouse.absolutePosition())
     return
   end
 
-  -- Already awake and being clicked: that's a question, not a request to stop.
-  -- Turning off is the menu, or a second click when there is nothing to say.
+  -- No menu object at all: fall back to the single most useful action rather
+  -- than doing nothing.
+  Mochi.toggleWriting()
+end
+
+--- What the menu's "What's wrong with this draft?" item does.
+local function showFindings()
+  if not writing then
+    say("I'm asleep.", "Turn writing mode on and I'll start reading your draft.", "mochi · off")
+    return
+  end
+
   if not connected then
     say("Nothing's reaching me yet.",
-        "Writing mode is on, but no Substack tab has connected.\nReload the draft tab (⌘R).\nClick me again to go back to sleep.",
+        "Writing mode is on, but no Substack tab has connected.\nReload the draft tab (⌘R).",
         "bridge · waiting")
-    -- A second click on a mode that isn't working turns it off, so the pet is
-    -- never a state you can't get out of without the menu bar.
-    if askedTwice then setWriting(false) end
-    askedTwice = not askedTwice
     return
   end
-
-  askedTwice = false
 
   if not latest then
     say("Connected, but the draft is empty.", nil, "bridge · connected")
@@ -167,42 +193,60 @@ end
 
 local function buildMenu()
   local items = {
-    {
-      title = writing and "Writing mode: on" or "Writing mode: off",
-      fn = Mochi.toggleWriting,
-      checked = writing,
-    },
+    -- Status first and unclickable: the top line of the menu answers "what is
+    -- mochi doing right now" before offering to change it.
     {
       title = writing
-        and (connected and "  a draft is connected" or "  waiting for a draft tab")
-        or "  not reading anything",
+        and (connected and "Reading your draft" or "Waiting for a draft tab")
+        or "Asleep — not reading anything",
       disabled = true,
     },
     { title = "-" },
-  }
-
-  for _, mode in ipairs(NAG_MODES) do
-    items[#items + 1] = {
-      title = mode.label,
-      checked = state.nagMode == mode.id,
+    {
+      title = writing and "Turn writing mode off" or "Turn writing mode on",
+      fn = Mochi.toggleWriting,
+    },
+    {
+      title = "What's wrong with this draft?",
       disabled = not writing,
+      fn = showFindings,
+    },
+    { title = "-" },
+    {
+      title = "When to interrupt me",
+      menu = (function()
+        local modes = {}
+        for _, mode in ipairs(NAG_MODES) do
+          modes[#modes + 1] = {
+            title = mode.label,
+            checked = state.nagMode == mode.id,
+            fn = function()
+              state.nagMode = mode.id
+              State.save(state)
+            end,
+          }
+        end
+        return modes
+      end)(),
+    },
+    {
+      title = "Playbooks",
+      menu = {
+        { title = "The Write Path — craft", disabled = true },
+        { title = "Slay with Finances — strategy (Stage 8)", disabled = true },
+      },
+    },
+    { title = "-" },
+    {
+      title = pet and pet:isHidden() and "Show mochi" or "Hide mochi",
       fn = function()
-        state.nagMode = mode.id
+        if not pet then return end
+        if pet:isHidden() then pet:show() else pet:hide() end
         State.save(state)
       end,
-    }
-  end
-
-  items[#items + 1] = { title = "-" }
-  items[#items + 1] = {
-    title = pet and pet:isHidden() and "Show mochi" or "Hide mochi",
-    fn = function()
-      if not pet then return end
-      if pet:isHidden() then pet:show() else pet:hide() end
-      State.save(state)
-    end,
+    },
+    { title = "Quit mochi", fn = function() Mochi.quit() end },
   }
-  items[#items + 1] = { title = "Quit mochi", fn = function() Mochi.quit() end }
 
   return items
 end

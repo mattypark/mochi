@@ -45,10 +45,26 @@ socket.addEventListener("open", () => {
 
 socket.addEventListener("message", (event) => {
   clearTimeout(timeout);
-  console.log("bridge replied:", event.data);
-  console.log("\nmochi should now be showing a bubble with 4 findings.");
+
+  const reply = JSON.parse(event.data);
+  console.log("bridge replied:", JSON.stringify({ ok: reply.ok, words: reply.words }));
+
+  // The marks are what the page draws under the offending paragraphs. Block 3
+  // is the blockquote and must never appear here.
+  console.log(`\n${(reply.marks || []).length} marks:`);
+  for (const mark of reply.marks || []) {
+    console.log(`  block ${mark.block}  ${mark.rule.padEnd(9)} ${mark.severity.padEnd(11)} ${mark.text ?? ""}`);
+  }
+
+  const quoted = (reply.marks || []).filter((m) => m.block === 3);
+  console.log(
+    quoted.length === 0
+      ? "\nOK: the blockquote was not marked."
+      : `\nFAIL: the blockquote got ${quoted.length} marks.`
+  );
+
   socket.close();
-  process.exit(0);
+  process.exit(quoted.length === 0 ? 0 : 1);
 });
 
 socket.addEventListener("error", () => {

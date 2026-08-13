@@ -19,6 +19,7 @@ local GAP = 10          -- pet ↔ bubble
 local RADIUS = 12
 local SIZE = 12.5
 local FONT = "Menlo"
+local BOLD = "Menlo-Bold"
 
 local INK = { white = 0.16, alpha = 1 }
 local PAPER = { red = 0.98, green = 0.97, blue = 0.94, alpha = 0.98 }
@@ -29,12 +30,45 @@ function Bubble.new()
   return setmetatable({ anchor = { x = 0, y = 0, w = 0, h = 0 } }, Bubble)
 end
 
-local function styled(text, color, size)
+local function styled(text, color, size, bold)
   return hs.styledtext.new(text, {
-    font = { name = FONT, size = size or SIZE },
+    font = { name = bold and BOLD or FONT, size = size or SIZE },
     color = color,
     paragraphStyle = { lineBreak = "wordWrap", alignment = "left" },
   })
+end
+
+--- Bold the quoted fragments, and nothing else.
+---
+--- Every rule names the exact words it is complaining about, and it names them
+--- in double quotes. Those are the only part of a critique worth scanning for —
+--- the rest is the reason. Bolding them turns a paragraph of advice into
+--- something readable at a glance while still typing.
+---
+--- Built by concatenating styled runs: hs.styledtext supports per-range
+--- attributes, but composing runs is far easier to follow than computing byte
+--- offsets into wrapped text.
+local function emphasise(text, color, size)
+  local result = nil
+
+  local function append(chunk, bold)
+    if chunk == "" then return end
+    local piece = styled(chunk, color, size, bold)
+    result = result and (result .. piece) or piece
+  end
+
+  local position = 1
+  while true do
+    local openQuote, closeQuote = text:find('"[^"]*"', position)
+    if not openQuote then break end
+
+    append(text:sub(position, openQuote - 1), false)
+    append(text:sub(openQuote, closeQuote), true)
+    position = closeQuote + 1
+  end
+
+  append(text:sub(position), false)
+  return result or styled(text, color, size, false)
 end
 
 --- Wrap to a pixel width, returning the wrapped text and its line count.
@@ -104,7 +138,9 @@ end
 function Bubble:show(headline, detail, footer)
   local innerW = W - PAD * 2
 
-  local headText, headLines = wrap(headline, innerW)
+  -- The headline wraps to the narrower column it is actually drawn in, or a long
+  -- one would be measured at one height and rendered at another.
+  local headText, headLines = wrap(headline, innerW - 18)
   local bodyText, bodyLines = nil, 0
   if detail then bodyText, bodyLines = wrap(detail, innerW) end
 
@@ -133,6 +169,13 @@ function Bubble:show(headline, detail, footer)
     roundedRectRadii = { xRadius = RADIUS, yRadius = RADIUS },
     frame = { x = 0, y = 0, w = W, h = height },
   }, {
+    -- Top left, where nothing else ever sits. The whole bubble dismisses on
+    -- click too, but a bubble covering the sentence you are trying to read needs
+    -- an obvious way out, not a discovered one.
+    type = "text",
+    text = styled("✕", DIM, 12),
+    frame = { x = PAD - 4, y = PAD - 5, w = 16, h = 18 },
+  }, {
     type = "rectangle",
     action = "stroke",
     strokeColor = EDGE,
@@ -141,8 +184,9 @@ function Bubble:show(headline, detail, footer)
     frame = { x = 0.5, y = 0.5, w = W - 1, h = height - 1 },
   }, {
     type = "text",
-    text = styled(headText, INK),
-    frame = { x = PAD, y = PAD, w = innerW, h = headLines * lineHeight() },
+    text = styled(headText, INK, SIZE, true),
+    -- Indented past the ✕ so the first line never collides with it.
+    frame = { x = PAD + 18, y = PAD, w = innerW - 18, h = headLines * lineHeight() },
   })
 
   local y = PAD + headLines * lineHeight()
@@ -151,7 +195,7 @@ function Bubble:show(headline, detail, footer)
     y = y + 6
     self.canvas:appendElements({
       type = "text",
-      text = styled(bodyText, DIM),
+      text = emphasise(bodyText, INK),
       frame = { x = PAD, y = y, w = innerW, h = bodyLines * lineHeight() },
     })
     y = y + bodyLines * lineHeight()

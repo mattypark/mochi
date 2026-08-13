@@ -98,8 +98,16 @@ function Bridge.start()
       return hs.json.encode({ ok = false, error = err })
     end
 
-    if onDraft then onDraft(draft) end
-    return hs.json.encode({ ok = true, words = draft.words })
+    -- The reply carries the findings back to the page. The pet says *what* is
+    -- wrong; only the browser knows *where* the paragraph is on screen, so the
+    -- marking has to happen at that end.
+    local marks = onDraft and onDraft(draft) or nil
+
+    return hs.json.encode({
+      ok = true,
+      words = draft.words,
+      marks = marks or {},
+    })
   end)
 
   -- Only the websocket path is served; there is no document root, so an

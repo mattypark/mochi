@@ -111,8 +111,14 @@
     "BLOCKQUOTE", "PRE", "LI", "FIGCAPTION",
   ]);
 
+  // The DOM nodes behind the blocks most recently sent, in the same order, so a
+  // finding that says "block 4" can be drawn over the right paragraph. Kept
+  // here rather than sent over the wire: Hammerspoon has no use for a node.
+  let blockNodes = [];
+
   function readBlocks(editor) {
     const blocks = [];
+    blockNodes = [];
 
     for (const node of editor.querySelectorAll(Array.from(BLOCK_TAGS).join(","))) {
       // A LI inside a UL inside the editor is a block; a P wrapping that LI is
@@ -130,6 +136,7 @@
         : node.tagName.toLowerCase();
 
       blocks.push({ tag, text });
+      blockNodes.push(node);
     }
 
     return blocks;
@@ -205,8 +212,22 @@
 
     try {
       socket = new WebSocket(BRIDGE_URL);
-      socket.addEventListener("close", () => { socket = null; });
-      socket.addEventListener("error", () => { socket = null; });
+
+      socket.addEventListener("message", (event) => {
+        try {
+          const reply = JSON.parse(event.data);
+          if (reply && reply.ok) setMarks(reply.marks);
+        } catch (_) {
+          // A reply we can't parse means the pet and the page disagree about
+          // the protocol. Drop the marks rather than leaving stale ones up.
+          setMarks([]);
+        }
+      });
+
+      // Writing mode going off closes the socket, and the marks have to go with
+      // it — a mark still on screen would claim mochi is still watching.
+      socket.addEventListener("close", () => { socket = null; setMarks([]); });
+      socket.addEventListener("error", () => { socket = null; setMarks([]); });
     } catch (_) {
       socket = null;
     }
@@ -215,6 +236,73 @@
   }
 
   let lastBody = null;
+
+  // ------------------------------------------------------------------ marking
+
+  // Marks are drawn in an overlay layer positioned over the paragraph's own
+  // rectangle. Nothing is ever inserted into the editor: ProseMirror owns that
+  // subtree and treats foreign nodes as document content, so wrapping a word in
+  // a <span> would end up in the published post.
+  let layer = null;
+  let marks = [];
+
+  function ensureLayer() {
+    if (layer && layer.isConnected) return layer;
+
+    layer = document.createElement("div");
+    layer.style.cssText = [
+      "position:absolute",
+      "top:0",
+      "left:0",
+      "width:0",
+      "height:0",
+      "pointer-events:none",
+      "z-index:2147483646",
+    ].join(";");
+
+    document.body.appendChild(layer);
+    return layer;
+  }
+
+  function paintMarks() {
+    const node = ensureLayer();
+    node.textContent = "";
+
+    for (const mark of marks) {
+      const target = blockNodes[mark.block - 1]; // Lua indexes from 1
+      if (!target || !target.isConnected) continue;
+
+      const box = target.getBoundingClientRect();
+      if (box.width === 0 && box.height === 0) continue;
+
+      const rule = document.createElement("div");
+      // Under the paragraph rather than over the words: a highlight behind live
+      // text fights the text, and the point is to guide the eye, not to redact.
+      rule.style.cssText = [
+        "position:absolute",
+        `left:${box.left + window.scrollX}px`,
+        `top:${box.bottom + window.scrollY - 2}px`,
+        `width:${box.width}px`,
+        "height:2px",
+        "border-radius:2px",
+        mark.severity === "structural"
+          ? "background:rgba(201,74,47,0.55)"
+          : "background:rgba(125,154,95,0.55)",
+      ].join(";");
+
+      node.appendChild(rule);
+    }
+  }
+
+  function setMarks(next) {
+    marks = Array.isArray(next) ? next : [];
+    paintMarks();
+  }
+
+  // Rectangles move whenever the page does, and a mark left at a stale position
+  // points at the wrong paragraph — worse than pointing at nothing.
+  window.addEventListener("scroll", paintMarks, { passive: true });
+  window.addEventListener("resize", paintMarks, { passive: true });
 
   function emit(draft) {
     const live = ensureSocket();
