@@ -20,6 +20,7 @@ local Bridge = require("mochi.bridge")
 local Rules = require("mochi.rules")
 local Nag = require("mochi.nag")
 local State = require("mochi.state")
+local Draft = require("mochi.draft")
 local Log = require("mochi.log")
 
 local Mochi = {}
@@ -36,7 +37,8 @@ local writing = false
 local connected = false
 local askedTwice = false    -- second click on a stuck mode turns it off
 local latest = nil          -- the last draft that arrived
-local previousWords = nil   -- for the 10% rule; Stage 4 makes this durable
+local history = nil         -- draft sessions for the post being edited
+local historyKey = nil
 
 -- -------------------------------------------------------------------- speaking
 
@@ -77,6 +79,22 @@ local function onDraft(draft)
   latest = draft
   Log.write("draft received: %d words, %d blocks", draft.words, #draft.blocks)
 
+  -- History is per post, and which post is being edited is only known once a
+  -- draft arrives — the URL is not available before that.
+  local key = Draft.key(draft.url)
+  if key ~= historyKey then
+    if history then
+      Draft.finish(history, os.time())
+      Draft.save(historyKey, history)
+    end
+    historyKey = key
+    history = Draft.begin(Draft.load(key), draft.url, os.time())
+    Log.write("history: %s, draft #%d", key, Draft.number(history))
+  end
+
+  Draft.record(history, draft, os.time())
+
+  local previousWords = Draft.previousWords(history)
   local findings = Rules.check(draft, { previousWords = previousWords })
   Log.write("%d findings, nag mode %s", #findings, state.nagMode)
   Nag.consider(findings, state.nagMode, speak)
@@ -131,6 +149,15 @@ local function setWriting(on)
     Nag.reset()
     connected = false
     if bubble then bubble:hide() end
+
+    -- Ending the session is what makes this draft the thing the *next* one is
+    -- measured against, so it has to happen before the state is dropped.
+    if history then
+      Draft.finish(history, os.time())
+      Draft.save(historyKey, history)
+      Log.write("history saved: %s", tostring(historyKey))
+      history, historyKey = nil, nil
+    end
   end
 
   if pet then pet:setAwake(writing) end
