@@ -21,6 +21,7 @@
 
   const DEBOUNCE_MS = 400;   // long enough to not fire mid-word, short enough to feel live
   const RECONNECT_MS = 4000; // floor between connection attempts while mochi is asleep
+  const REPAINT_MS = 1000;   // catches layout shifts that fire no event at all
   const BRIDGE_URL = "ws://127.0.0.1:27852/mochi";
   const LOG_PREFIX = "[mochi]";
 
@@ -301,8 +302,21 @@
 
   // Rectangles move whenever the page does, and a mark left at a stale position
   // points at the wrong paragraph — worse than pointing at nothing.
-  window.addEventListener("scroll", paintMarks, { passive: true });
+  //
+  // Listening on `document` with capture, NOT on `window`: scroll events do not
+  // bubble, so a window listener sees only the page scrolling. Substack's editor
+  // sits inside its own `div.editor-scroll`, which means the window listener
+  // caught none of the scrolling that actually matters here. Capture phase sees
+  // every scroller on the page.
+  document.addEventListener("scroll", paintMarks, { passive: true, capture: true });
   window.addEventListener("resize", paintMarks, { passive: true });
+
+  // Nothing fires an event when a stylesheet loads, a font swaps in, or a
+  // sidebar animates — all of which move the text. A slow poll costs nothing
+  // when there is nothing to draw and stops the marks drifting when there is.
+  setInterval(() => {
+    if (marks.length) paintMarks();
+  }, REPAINT_MS);
 
   function emit(draft) {
     const live = ensureSocket();
